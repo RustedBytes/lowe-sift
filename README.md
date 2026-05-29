@@ -36,7 +36,7 @@ By default the crate enables an `image` feature for conversion from the `image` 
 For a core-only build:
 
 ```toml
-lowe-sift = { path = "path/to/lowe-sift", default-features = false }
+lowe-sift = { version = "0.1.0", default-features = false }
 ```
 
 ## Extract features
