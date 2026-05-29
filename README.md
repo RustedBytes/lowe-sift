@@ -29,7 +29,7 @@ This is a readable reference-style implementation, not a SIMD-optimized extracto
 
 ```toml
 [dependencies]
-lowe-sift = { path = "path/to/lowe-sift" }
+lowe-sift = { version = "0.1.0" }
 ```
 
 By default the crate enables an `image` feature for conversion from the `image` crate.
