@@ -26,6 +26,7 @@
 //! # }
 //! ```
 
+#![cfg_attr(feature = "simd", feature(portable_simd))]
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 

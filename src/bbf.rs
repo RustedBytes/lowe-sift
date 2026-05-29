@@ -443,12 +443,28 @@ impl Ord for QueueEntry {
 
 #[inline]
 fn distance2(a: &[f32; DESCRIPTOR_LEN], b: &[f32; DESCRIPTOR_LEN]) -> f32 {
-    let mut sum = 0.0;
-    for dim in 0..DESCRIPTOR_LEN {
-        let delta = a[dim] - b[dim];
-        sum += delta * delta;
+    #[cfg(feature = "simd")]
+    {
+        use std::simd::f32x8;
+        use std::simd::num::SimdFloat;
+        let mut sum_simd = f32x8::splat(0.0);
+        for i in (0..DESCRIPTOR_LEN).step_by(8) {
+            let va = f32x8::from_slice(&a[i..i + 8]);
+            let vb = f32x8::from_slice(&b[i..i + 8]);
+            let diff = va - vb;
+            sum_simd += diff * diff;
+        }
+        sum_simd.reduce_sum()
     }
-    sum
+    #[cfg(not(feature = "simd"))]
+    {
+        let mut sum = 0.0;
+        for dim in 0..DESCRIPTOR_LEN {
+            let delta = a[dim] - b[dim];
+            sum += delta * delta;
+        }
+        sum
+    }
 }
 
 #[inline]

@@ -223,14 +223,45 @@ impl GrayImage {
             let start_x = radius.max(0) as usize;
             let end_x = (self.width as isize - radius).max(0) as usize;
             if start_x < end_x {
-                for x in start_x..end_x {
-                    let mut acc = 0.0;
-                    for (i, &w) in kernel.iter().enumerate() {
-                        let dx = i as isize - radius;
-                        let xx = (x as isize + dx) as usize;
-                        acc += w * self.data[y_offset + xx];
+                #[cfg(feature = "simd")]
+                {
+                    use std::simd::f32x8;
+                    let step = 8;
+                    let len_x = end_x - start_x;
+                    let end_x_simd = start_x + len_x - (len_x % step);
+                    for x in (start_x..end_x_simd).step_by(step) {
+                        let mut acc_simd = f32x8::splat(0.0);
+                        for (i, &w) in kernel.iter().enumerate() {
+                            let w_simd = f32x8::splat(w);
+                            let dx = i as isize - radius;
+                            let base_idx = (y_offset as isize + x as isize + dx) as usize;
+                            let data_simd = f32x8::from_slice(&self.data[base_idx..base_idx + 8]);
+                            acc_simd += w_simd * data_simd;
+                        }
+                        let out_idx = y_offset + x;
+                        acc_simd.copy_to_slice(&mut tmp[out_idx..out_idx + 8]);
                     }
-                    tmp[y_offset + x] = acc;
+                    for x in end_x_simd..end_x {
+                        let mut acc = 0.0;
+                        for (i, &w) in kernel.iter().enumerate() {
+                            let dx = i as isize - radius;
+                            let xx = (x as isize + dx) as usize;
+                            acc += w * self.data[y_offset + xx];
+                        }
+                        tmp[y_offset + x] = acc;
+                    }
+                }
+                #[cfg(not(feature = "simd"))]
+                {
+                    for x in start_x..end_x {
+                        let mut acc = 0.0;
+                        for (i, &w) in kernel.iter().enumerate() {
+                            let dx = i as isize - radius;
+                            let xx = (x as isize + dx) as usize;
+                            acc += w * self.data[y_offset + xx];
+                        }
+                        tmp[y_offset + x] = acc;
+                    }
                 }
             }
             
@@ -267,12 +298,39 @@ impl GrayImage {
         for y in start_y..end_y {
             let y_offset = y * self.width;
             let start_yy = (y as isize - radius) as usize;
-            for x in 0..self.width {
-                let mut acc = 0.0;
-                for (i, &w) in kernel.iter().enumerate() {
-                    acc += w * tmp[(start_yy + i) * self.width + x];
+            #[cfg(feature = "simd")]
+            {
+                use std::simd::f32x8;
+                let step = 8;
+                let end_x_simd = self.width - (self.width % step);
+                for x in (0..end_x_simd).step_by(step) {
+                    let mut acc_simd = f32x8::splat(0.0);
+                    for (i, &w) in kernel.iter().enumerate() {
+                        let w_simd = f32x8::splat(w);
+                        let base_idx = (start_yy + i) * self.width + x;
+                        let data_simd = f32x8::from_slice(&tmp[base_idx..base_idx + 8]);
+                        acc_simd += w_simd * data_simd;
+                    }
+                    let out_idx = y_offset + x;
+                    acc_simd.copy_to_slice(&mut out[out_idx..out_idx + 8]);
                 }
-                out[y_offset + x] = acc;
+                for x in end_x_simd..self.width {
+                    let mut acc = 0.0;
+                    for (i, &w) in kernel.iter().enumerate() {
+                        acc += w * tmp[(start_yy + i) * self.width + x];
+                    }
+                    out[y_offset + x] = acc;
+                }
+            }
+            #[cfg(not(feature = "simd"))]
+            {
+                for x in 0..self.width {
+                    let mut acc = 0.0;
+                    for (i, &w) in kernel.iter().enumerate() {
+                        acc += w * tmp[(start_yy + i) * self.width + x];
+                    }
+                    out[y_offset + x] = acc;
+                }
             }
         }
         

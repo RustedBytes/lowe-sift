@@ -23,6 +23,7 @@ image = { version = "0.25", optional = true, default-features = false, features 
 [features]
 default = ["image"]
 image = ["dep:image"]
+simd = []
 
 [[example]]
 name = "extract"

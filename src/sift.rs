@@ -38,12 +38,30 @@ impl Descriptor {
     /// Squared Euclidean distance to another descriptor.
     #[inline]
     pub fn distance2(&self, other: &Self) -> f32 {
-        let mut sum = 0.0;
-        for i in 0..DESCRIPTOR_LEN {
-            let d = self.values[i] - other.values[i];
-            sum += d * d;
+        #[cfg(feature = "simd")]
+        {
+            use std::simd::f32x8;
+            use std::simd::num::SimdFloat;
+            let mut sum_simd = f32x8::splat(0.0);
+            let a = self.values;
+            let b = other.values;
+            for i in (0..DESCRIPTOR_LEN).step_by(8) {
+                let va = f32x8::from_slice(&a[i..i + 8]);
+                let vb = f32x8::from_slice(&b[i..i + 8]);
+                let diff = va - vb;
+                sum_simd += diff * diff;
+            }
+            sum_simd.reduce_sum()
         }
-        sum
+        #[cfg(not(feature = "simd"))]
+        {
+            let mut sum = 0.0;
+            for i in 0..DESCRIPTOR_LEN {
+                let d = self.values[i] - other.values[i];
+                sum += d * d;
+            }
+            sum
+        }
     }
 
     pub(crate) fn from_mutated(values: [f32; DESCRIPTOR_LEN]) -> Self {
