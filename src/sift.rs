@@ -41,18 +41,50 @@ impl Descriptor {
     pub fn distance2(&self, other: &Self) -> f32 {
         #[cfg(feature = "simd")]
         {
-            use std::simd::f32x8;
+            use std::simd::f32x16;
             use std::simd::num::SimdFloat;
-            let mut sum_simd = f32x8::splat(0.0);
-            let a = self.values;
-            let b = other.values;
-            for i in (0..DESCRIPTOR_LEN).step_by(8) {
-                let va = f32x8::from_slice(&a[i..i + 8]);
-                let vb = f32x8::from_slice(&b[i..i + 8]);
-                let diff = va - vb;
-                sum_simd += diff * diff;
-            }
-            sum_simd.reduce_sum()
+            let a = &self.values;
+            let b = &other.values;
+
+            let va0 = f32x16::from_slice(&a[0..16]);
+            let vb0 = f32x16::from_slice(&b[0..16]);
+            let d0 = va0 - vb0;
+
+            let va1 = f32x16::from_slice(&a[16..32]);
+            let vb1 = f32x16::from_slice(&b[16..32]);
+            let d1 = va1 - vb1;
+
+            let va2 = f32x16::from_slice(&a[32..48]);
+            let vb2 = f32x16::from_slice(&b[32..48]);
+            let d2 = va2 - vb2;
+
+            let va3 = f32x16::from_slice(&a[48..64]);
+            let vb3 = f32x16::from_slice(&b[48..64]);
+            let d3 = va3 - vb3;
+
+            let va4 = f32x16::from_slice(&a[64..80]);
+            let vb4 = f32x16::from_slice(&b[64..80]);
+            let d4 = va4 - vb4;
+
+            let va5 = f32x16::from_slice(&a[80..96]);
+            let vb5 = f32x16::from_slice(&b[80..96]);
+            let d5 = va5 - vb5;
+
+            let va6 = f32x16::from_slice(&a[96..112]);
+            let vb6 = f32x16::from_slice(&b[96..112]);
+            let d6 = va6 - vb6;
+
+            let va7 = f32x16::from_slice(&a[112..128]);
+            let vb7 = f32x16::from_slice(&b[112..128]);
+            let d7 = va7 - vb7;
+
+            let sum0 = d0 * d0 + d1 * d1;
+            let sum1 = d2 * d2 + d3 * d3;
+            let sum2 = d4 * d4 + d5 * d5;
+            let sum3 = d6 * d6 + d7 * d7;
+
+            let final_sum = (sum0 + sum1) + (sum2 + sum3);
+            final_sum.reduce_sum()
         }
         #[cfg(not(feature = "simd"))]
         {
@@ -918,23 +950,39 @@ fn trilinear_accumulate(
 fn normalize_descriptor(values: &mut [f32; DESCRIPTOR_LEN]) -> Option<()> {
     #[cfg(feature = "simd")]
     {
-        use std::simd::f32x8;
+        use std::simd::f32x16;
         use std::simd::num::SimdFloat;
-        let mut sum_simd = f32x8::splat(0.0);
-        for i in (0..DESCRIPTOR_LEN).step_by(8) {
-            let v = f32x8::from_slice(&values[i..i + 8]);
-            sum_simd += v * v;
-        }
-        let norm2 = sum_simd.reduce_sum();
+
+        let v0 = f32x16::from_slice(&values[0..16]);
+        let v1 = f32x16::from_slice(&values[16..32]);
+        let v2 = f32x16::from_slice(&values[32..48]);
+        let v3 = f32x16::from_slice(&values[48..64]);
+        let v4 = f32x16::from_slice(&values[64..80]);
+        let v5 = f32x16::from_slice(&values[80..96]);
+        let v6 = f32x16::from_slice(&values[96..112]);
+        let v7 = f32x16::from_slice(&values[112..128]);
+
+        let sum0 = v0 * v0 + v1 * v1;
+        let sum1 = v2 * v2 + v3 * v3;
+        let sum2 = v4 * v4 + v5 * v5;
+        let sum3 = v6 * v6 + v7 * v7;
+
+        let final_sum = (sum0 + sum1) + (sum2 + sum3);
+        let norm2 = final_sum.reduce_sum();
         if norm2 <= EPSILON * EPSILON {
             return None;
         }
-        let inv_norm = f32x8::splat(1.0 / norm2.sqrt());
-        for i in (0..DESCRIPTOR_LEN).step_by(8) {
-            let mut v = f32x8::from_slice(&values[i..i + 8]);
-            v *= inv_norm;
-            v.copy_to_slice(&mut values[i..i + 8]);
-        }
+        let inv_norm = f32x16::splat(1.0 / norm2.sqrt());
+
+        (v0 * inv_norm).copy_to_slice(&mut values[0..16]);
+        (v1 * inv_norm).copy_to_slice(&mut values[16..32]);
+        (v2 * inv_norm).copy_to_slice(&mut values[32..48]);
+        (v3 * inv_norm).copy_to_slice(&mut values[48..64]);
+        (v4 * inv_norm).copy_to_slice(&mut values[64..80]);
+        (v5 * inv_norm).copy_to_slice(&mut values[80..96]);
+        (v6 * inv_norm).copy_to_slice(&mut values[96..112]);
+        (v7 * inv_norm).copy_to_slice(&mut values[112..128]);
+
         Some(())
     }
     #[cfg(not(feature = "simd"))]

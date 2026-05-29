@@ -230,8 +230,16 @@ impl GrayImage {
         tmp.resize(self.data.len(), 0.0);
         let mut out = vec![0.0; self.data.len()];
 
+        let row_offsets: Vec<usize> = (0..self.height).map(|r| r * self.width).collect();
+
+        #[cfg(feature = "simd")]
+        let w_splatted: Vec<_> = kernel
+            .iter()
+            .map(|&w| std::simd::f32x8::splat(w))
+            .collect();
+
         for y in 0..self.height {
-            let y_offset = y * self.width;
+            let y_offset = row_offsets[y];
             
             // Left margin: x in [0, radius)
             for x in 0..radius.min(self.width as isize) {
@@ -256,10 +264,10 @@ impl GrayImage {
                     let end_x_simd = start_x + len_x - (len_x % step);
                     for x in (start_x..end_x_simd).step_by(step) {
                         let mut acc_simd = f32x8::splat(0.0);
-                        for (i, &w) in kernel.iter().enumerate() {
-                            let w_simd = f32x8::splat(w);
-                            let dx = i as isize - radius;
-                            let base_idx = (y_offset as isize + x as isize + dx) as usize;
+                        let x_base = y_offset as isize - radius + x as isize;
+                        for i in 0..kernel.len() {
+                            let w_simd = w_splatted[i];
+                            let base_idx = (x_base + i as isize) as usize;
                             let data_simd = f32x8::from_slice(&self.data[base_idx..base_idx + 8]);
                             acc_simd += w_simd * data_simd;
                         }
@@ -305,13 +313,13 @@ impl GrayImage {
 
         // Top margin: y in [0, radius)
         for y in 0..radius.min(self.height as isize) {
-            let y_offset = (y as usize) * self.width;
+            let y_offset = row_offsets[y as usize];
             for x in 0..self.width {
                 let mut acc = 0.0;
                 for (i, &w) in kernel.iter().enumerate() {
                     let dy = i as isize - radius;
                     let yy = (y + dy).clamp(0, self.height as isize - 1) as usize;
-                    acc += w * tmp[yy * self.width + x];
+                    acc += w * tmp[row_offsets[yy] + x];
                 }
                 out[y_offset + x] = acc;
             }
@@ -321,18 +329,24 @@ impl GrayImage {
         let start_y = radius.max(0) as usize;
         let end_y = (self.height as isize - radius).max(0) as usize;
         for y in start_y..end_y {
-            let y_offset = y * self.width;
+            let y_offset = row_offsets[y];
             let start_yy = (y as isize - radius) as usize;
             #[cfg(feature = "simd")]
             {
                 use std::simd::f32x8;
                 let step = 8;
                 let end_x_simd = self.width - (self.width % step);
+                
+                let mut yy_offsets = [0usize; 256];
+                for i in 0..kernel.len() {
+                    yy_offsets[i] = row_offsets[start_yy + i];
+                }
+
                 for x in (0..end_x_simd).step_by(step) {
                     let mut acc_simd = f32x8::splat(0.0);
-                    for (i, &w) in kernel.iter().enumerate() {
-                        let w_simd = f32x8::splat(w);
-                        let base_idx = (start_yy + i) * self.width + x;
+                    for i in 0..kernel.len() {
+                        let w_simd = w_splatted[i];
+                        let base_idx = yy_offsets[i] + x;
                         let data_simd = f32x8::from_slice(&tmp[base_idx..base_idx + 8]);
                         acc_simd += w_simd * data_simd;
                     }
@@ -342,7 +356,7 @@ impl GrayImage {
                 for x in end_x_simd..self.width {
                     let mut acc = 0.0;
                     for (i, &w) in kernel.iter().enumerate() {
-                        acc += w * tmp[(start_yy + i) * self.width + x];
+                        acc += w * tmp[row_offsets[start_yy + i] + x];
                     }
                     out[y_offset + x] = acc;
                 }
@@ -352,7 +366,7 @@ impl GrayImage {
                 for x in 0..self.width {
                     let mut acc = 0.0;
                     for (i, &w) in kernel.iter().enumerate() {
-                        acc += w * tmp[(start_yy + i) * self.width + x];
+                        acc += w * tmp[row_offsets[start_yy + i] + x];
                     }
                     out[y_offset + x] = acc;
                 }
