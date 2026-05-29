@@ -177,6 +177,7 @@ impl GrayImage {
         }
     }
 
+    #[inline]
     pub(crate) fn subtract(&self, rhs: &Self) -> Self {
         debug_assert_eq!(self.width, rhs.width);
         debug_assert_eq!(self.height, rhs.height);
@@ -193,36 +194,100 @@ impl GrayImage {
         }
     }
 
-    pub(crate) fn gaussian_blur(&self, sigma: f32) -> Self {
+    pub(crate) fn gaussian_blur(&self, sigma: f32, tmp: &mut Vec<f32>) -> Self {
         let kernel = gaussian_kernel(sigma);
         if kernel.len() == 1 {
             return self.clone();
         }
 
         let radius = (kernel.len() / 2) as isize;
-        let mut tmp = vec![0.0; self.data.len()];
+        tmp.clear();
+        tmp.resize(self.data.len(), 0.0);
         let mut out = vec![0.0; self.data.len()];
 
         for y in 0..self.height {
-            for x in 0..self.width {
+            let y_offset = y * self.width;
+            
+            // Left margin: x in [0, radius)
+            for x in 0..radius.min(self.width as isize) {
                 let mut acc = 0.0;
                 for (i, &w) in kernel.iter().enumerate() {
                     let dx = i as isize - radius;
-                    acc += w * self.get_clamped(x as isize + dx, y as isize);
+                    let xx = (x + dx).clamp(0, self.width as isize - 1) as usize;
+                    acc += w * self.data[y_offset + xx];
                 }
-                tmp[y * self.width + x] = acc;
+                tmp[y_offset + x as usize] = acc;
+            }
+            
+            // Interior: x in [radius, width - radius)
+            let start_x = radius.max(0) as usize;
+            let end_x = (self.width as isize - radius).max(0) as usize;
+            if start_x < end_x {
+                for x in start_x..end_x {
+                    let mut acc = 0.0;
+                    for (i, &w) in kernel.iter().enumerate() {
+                        let dx = i as isize - radius;
+                        let xx = (x as isize + dx) as usize;
+                        acc += w * self.data[y_offset + xx];
+                    }
+                    tmp[y_offset + x] = acc;
+                }
+            }
+            
+            // Right margin: x in [width - radius, width)
+            let start_right = (self.width as isize - radius).max(0);
+            for x in start_right..(self.width as isize) {
+                let mut acc = 0.0;
+                for (i, &w) in kernel.iter().enumerate() {
+                    let dx = i as isize - radius;
+                    let xx = (x + dx).clamp(0, self.width as isize - 1) as usize;
+                    acc += w * self.data[y_offset + xx];
+                }
+                tmp[y_offset + x as usize] = acc;
             }
         }
 
-        for y in 0..self.height {
+        // Top margin: y in [0, radius)
+        for y in 0..radius.min(self.height as isize) {
+            let y_offset = (y as usize) * self.width;
             for x in 0..self.width {
                 let mut acc = 0.0;
                 for (i, &w) in kernel.iter().enumerate() {
                     let dy = i as isize - radius;
-                    let yy = (y as isize + dy).clamp(0, self.height as isize - 1) as usize;
+                    let yy = (y + dy).clamp(0, self.height as isize - 1) as usize;
                     acc += w * tmp[yy * self.width + x];
                 }
-                out[y * self.width + x] = acc;
+                out[y_offset + x] = acc;
+            }
+        }
+        
+        // Interior: y in [radius, height - radius)
+        let start_y = radius.max(0) as usize;
+        let end_y = (self.height as isize - radius).max(0) as usize;
+        for y in start_y..end_y {
+            let y_offset = y * self.width;
+            let start_yy = (y as isize - radius) as usize;
+            for x in 0..self.width {
+                let mut acc = 0.0;
+                for (i, &w) in kernel.iter().enumerate() {
+                    acc += w * tmp[(start_yy + i) * self.width + x];
+                }
+                out[y_offset + x] = acc;
+            }
+        }
+        
+        // Bottom margin: y in [height - radius, height)
+        let start_bottom = (self.height as isize - radius).max(0);
+        for y in start_bottom..(self.height as isize) {
+            let y_offset = (y as usize) * self.width;
+            for x in 0..self.width {
+                let mut acc = 0.0;
+                for (i, &w) in kernel.iter().enumerate() {
+                    let dy = i as isize - radius;
+                    let yy = (y + dy).clamp(0, self.height as isize - 1) as usize;
+                    acc += w * tmp[yy * self.width + x];
+                }
+                out[y_offset + x] = acc;
             }
         }
 
@@ -233,6 +298,7 @@ impl GrayImage {
         }
     }
 
+    #[inline]
     pub(crate) fn downsample_by_2(&self) -> Self {
         let width = (self.width / 2).max(1);
         let height = (self.height / 2).max(1);
@@ -250,6 +316,7 @@ impl GrayImage {
         }
     }
 
+    #[inline]
     pub(crate) fn double_linear(&self) -> Self {
         let width = self.width * 2;
         let height = self.height * 2;
@@ -268,6 +335,7 @@ impl GrayImage {
         }
     }
 
+    #[inline]
     fn sample_bilinear(&self, x: f32, y: f32) -> f32 {
         let x0 = x.floor() as isize;
         let y0 = y.floor() as isize;
@@ -287,24 +355,45 @@ impl GrayImage {
     }
 }
 
-fn gaussian_kernel(sigma: f32) -> Vec<f32> {
-    if sigma <= 0.01 || !sigma.is_finite() {
-        return vec![1.0];
+#[derive(Clone, Copy)]
+pub(crate) struct Kernel {
+    pub(crate) data: [f32; 256],
+    pub(crate) len: usize,
+}
+
+impl Kernel {
+    #[inline]
+    pub(crate) fn len(&self) -> usize {
+        self.len
     }
 
-    let radius = (3.0 * sigma).ceil() as isize;
-    let mut kernel = Vec::with_capacity((2 * radius + 1) as usize);
+    #[inline]
+    pub(crate) fn iter(&self) -> std::slice::Iter<'_, f32> {
+        self.data[..self.len].iter()
+    }
+}
+
+fn gaussian_kernel(sigma: f32) -> Kernel {
+    if sigma <= 0.01 || !sigma.is_finite() {
+        let mut data = [0.0; 256];
+        data[0] = 1.0;
+        return Kernel { data, len: 1 };
+    }
+
+    let radius = ((3.0 * sigma).ceil() as isize).min(127);
+    let len = (2 * radius + 1) as usize;
+    let mut data = [0.0; 256];
     let denom = 2.0 * sigma * sigma;
     let mut sum = 0.0;
     for i in -radius..=radius {
         let v = (-(i * i) as f32 / denom).exp();
-        kernel.push(v);
+        data[(i + radius) as usize] = v;
         sum += v;
     }
-    for v in &mut kernel {
-        *v /= sum;
+    for i in 0..len {
+        data[i] /= sum;
     }
-    kernel
+    Kernel { data, len }
 }
 
 #[cfg(test)]
@@ -326,7 +415,8 @@ mod tests {
     #[test]
     fn blur_preserves_constant_image() {
         let image = GrayImage::new(11, 7, vec![0.25; 77]).unwrap();
-        let blurred = image.gaussian_blur(1.6);
+        let mut tmp = Vec::new();
+        let blurred = image.gaussian_blur(1.6, &mut tmp);
         for &pixel in blurred.data() {
             assert!((pixel - 0.25).abs() < 1e-5);
         }

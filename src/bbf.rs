@@ -156,32 +156,31 @@ impl BbfDescriptorIndex {
     ///
     /// The result is sorted by increasing distance. `max_candidates` caps the
     /// number of terminal descriptor vectors evaluated during the search.
-    pub fn nearest(
+    fn nearest_into(
         &self,
-        query: &Descriptor,
+        query_slice: &[f32; DESCRIPTOR_LEN],
         k: usize,
         max_candidates: usize,
-    ) -> Result<Vec<ApproxNeighbor>, BbfConfigError> {
+        best: &mut Vec<ApproxNeighbor>,
+        queue: &mut BinaryHeap<QueueEntry>,
+    ) -> Result<(), BbfConfigError> {
         if max_candidates == 0 {
             return Err(BbfConfigError::MaxCandidatesZero);
         }
         if k == 0 || self.is_empty() {
-            return Ok(Vec::new());
+            return Ok(());
         }
 
         let Some(root) = self.root else {
-            return Ok(Vec::new());
+            return Ok(());
         };
 
-        let query = query.as_slice();
-        let mut queue = BinaryHeap::new();
         queue.push(QueueEntry {
             lower_bound2: 0.0,
             node_index: root,
         });
 
         let mut candidates = 0usize;
-        let mut best = Vec::with_capacity(k.min(self.len()));
 
         while let Some(entry) = queue.pop() {
             if candidates >= max_candidates {
@@ -202,14 +201,14 @@ impl BbfDescriptorIndex {
                         break;
                     }
                     let descriptor_index = self.indices[slot];
-                    let distance2 = distance2(query, &self.descriptors[descriptor_index]);
+                    let distance2 = distance2(query_slice, &self.descriptors[descriptor_index]);
                     candidates += 1;
-                    insert_neighbor(&mut best, k, descriptor_index, distance2);
+                    insert_neighbor(best, k, descriptor_index, distance2);
                 }
                 continue;
             }
 
-            let q = query[node.split_dim];
+            let q = query_slice[node.split_dim];
             let axis_delta = q - node.split_value;
             let (near, far) = if axis_delta <= 0.0 {
                 (node.left, node.right)
@@ -231,6 +230,22 @@ impl BbfDescriptorIndex {
             }
         }
 
+        Ok(())
+    }
+
+    /// Returns up to `k` approximate nearest neighbors of `query`.
+    ///
+    /// The result is sorted by increasing distance. `max_candidates` caps the
+    /// number of terminal descriptor vectors evaluated during the search.
+    pub fn nearest(
+        &self,
+        query: &Descriptor,
+        k: usize,
+        max_candidates: usize,
+    ) -> Result<Vec<ApproxNeighbor>, BbfConfigError> {
+        let mut best = Vec::with_capacity(k.min(self.len()));
+        let mut queue = BinaryHeap::new();
+        self.nearest_into(query.as_slice(), k, max_candidates, &mut best, &mut queue)?;
         Ok(best)
     }
 
@@ -248,26 +263,31 @@ impl BbfDescriptorIndex {
         let ratio2 = config.ratio_threshold * config.ratio_threshold;
         let mut matches = Vec::new();
 
+        let mut best = Vec::with_capacity(2);
+        let mut queue = BinaryHeap::with_capacity(config.max_candidates);
+
         for (query_index, descriptor) in query.iter().enumerate() {
-            let neighbors = self.nearest(descriptor, 2, config.max_candidates)?;
-            if neighbors.len() < 2 {
+            best.clear();
+            queue.clear();
+            self.nearest_into(descriptor.as_slice(), 2, config.max_candidates, &mut best, &mut queue)?;
+            if best.len() < 2 {
                 continue;
             }
-            let best = neighbors[0];
-            let second = neighbors[1];
-            if !best.squared_distance.is_finite()
+            let first = best[0];
+            let second = best[1];
+            if !first.squared_distance.is_finite()
                 || !second.squared_distance.is_finite()
                 || second.squared_distance <= f32::EPSILON
             {
                 continue;
             }
-            if best.squared_distance < ratio2 * second.squared_distance {
+            if first.squared_distance < ratio2 * second.squared_distance {
                 matches.push(DescriptorMatch {
                     query_index,
-                    train_index: best.index,
-                    distance: best.distance,
+                    train_index: first.index,
+                    distance: first.distance,
                     second_distance: second.distance,
-                    ratio: best.distance / second.distance,
+                    ratio: first.distance / second.distance,
                 });
             }
         }
@@ -421,6 +441,7 @@ impl Ord for QueueEntry {
     }
 }
 
+#[inline]
 fn distance2(a: &[f32; DESCRIPTOR_LEN], b: &[f32; DESCRIPTOR_LEN]) -> f32 {
     let mut sum = 0.0;
     for dim in 0..DESCRIPTOR_LEN {
@@ -430,6 +451,7 @@ fn distance2(a: &[f32; DESCRIPTOR_LEN], b: &[f32; DESCRIPTOR_LEN]) -> f32 {
     sum
 }
 
+#[inline]
 fn insert_neighbor(best: &mut Vec<ApproxNeighbor>, k: usize, index: usize, squared_distance: f32) {
     if !squared_distance.is_finite() {
         return;

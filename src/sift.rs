@@ -36,15 +36,14 @@ impl Descriptor {
     }
 
     /// Squared Euclidean distance to another descriptor.
+    #[inline]
     pub fn distance2(&self, other: &Self) -> f32 {
-        self.values
-            .iter()
-            .zip(other.values.iter())
-            .map(|(a, b)| {
-                let d = a - b;
-                d * d
-            })
-            .sum()
+        let mut sum = 0.0;
+        for i in 0..DESCRIPTOR_LEN {
+            let d = self.values[i] - other.values[i];
+            sum += d * d;
+        }
+        sum
     }
 
     pub(crate) fn from_mutated(values: [f32; DESCRIPTOR_LEN]) -> Self {
@@ -238,17 +237,16 @@ impl Sift {
             return Vec::new();
         }
         let pyramid = self.build_pyramid(image);
-        let keypoints = self.find_oriented_keypoints(&pyramid);
-        keypoints
-            .into_iter()
-            .filter_map(|internal| {
-                self.compute_descriptor(&pyramid, &internal)
-                    .map(|descriptor| Feature {
-                        keypoint: internal.keypoint,
-                        descriptor,
-                    })
-            })
-            .collect()
+        let mut features = Vec::new();
+        self.find_oriented_keypoints(&pyramid, |internal| {
+            if let Some(descriptor) = self.compute_descriptor(&pyramid, &internal) {
+                features.push(Feature {
+                    keypoint: internal.keypoint,
+                    descriptor,
+                });
+            }
+        });
+        features
     }
 
     /// Detects localized, oriented keypoints without computing descriptors.
@@ -257,38 +255,42 @@ impl Sift {
             return Vec::new();
         }
         let pyramid = self.build_pyramid(image);
-        self.find_oriented_keypoints(&pyramid)
-            .into_iter()
-            .map(|internal| internal.keypoint)
-            .collect()
+        let mut keypoints = Vec::new();
+        self.find_oriented_keypoints(&pyramid, |internal| {
+            keypoints.push(internal.keypoint);
+        });
+        keypoints
     }
 
     fn build_pyramid(&self, image: &GrayImage) -> Pyramid {
-        let base = self.create_base_image(image);
+        let mut tmp_buffer = Vec::new();
+        let base = self.create_base_image(image, &mut tmp_buffer);
         let mut octaves = Vec::new();
         let mut octave_base = base;
         let intervals = self.config.intervals;
         let gaussian_count = intervals + 3;
         let k = 2.0_f32.powf(1.0 / intervals as f32);
 
-        let mut incremental_sigmas = Vec::with_capacity(gaussian_count);
-        incremental_sigmas.push(self.config.sigma);
-        for i in 1..gaussian_count {
+        let mut incremental_sigmas = [0.0; 32];
+        incremental_sigmas[0] = self.config.sigma;
+        let sigmas_len = gaussian_count.min(32);
+        for i in 1..sigmas_len {
             let prev = self.config.sigma * k.powi(i as i32 - 1);
             let total = prev * k;
-            incremental_sigmas.push((total * total - prev * prev).max(0.0).sqrt());
+            incremental_sigmas[i] = (total * total - prev * prev).max(0.0).sqrt();
         }
 
         while octave_base.width() >= self.config.min_octave_size
             && octave_base.height() >= self.config.min_octave_size
         {
             let mut gaussians = Vec::with_capacity(gaussian_count);
-            gaussians.push(octave_base.clone());
-            for &sigma in incremental_sigmas.iter().skip(1) {
+            gaussians.push(octave_base);
+            for i in 1..gaussian_count {
+                let sigma = if i < sigmas_len { incremental_sigmas[i] } else { 0.0 };
                 let next = gaussians
                     .last()
                     .expect("at least one gaussian")
-                    .gaussian_blur(sigma);
+                    .gaussian_blur(sigma, &mut tmp_buffer);
                 gaussians.push(next);
             }
 
@@ -298,9 +300,12 @@ impl Sift {
             }
 
             let next_base = gaussians[intervals].downsample_by_2();
+            let prev_width = gaussians[0].width();
+            let prev_height = gaussians[0].height();
+
             octaves.push(Octave { gaussians, dogs });
-            if next_base.width() == octave_base.width()
-                || next_base.height() == octave_base.height()
+            if next_base.width() == prev_width
+                || next_base.height() == prev_height
             {
                 break;
             }
@@ -310,7 +315,7 @@ impl Sift {
         Pyramid { octaves }
     }
 
-    fn create_base_image(&self, image: &GrayImage) -> GrayImage {
+    fn create_base_image(&self, image: &GrayImage, tmp_buffer: &mut Vec<f32>) -> GrayImage {
         let base = if self.config.double_image {
             image.double_linear()
         } else {
@@ -324,11 +329,13 @@ impl Sift {
         let sigma_diff = (self.config.sigma * self.config.sigma - current_blur * current_blur)
             .max(0.0)
             .sqrt();
-        base.gaussian_blur(sigma_diff)
+        base.gaussian_blur(sigma_diff, tmp_buffer)
     }
 
-    fn find_oriented_keypoints(&self, pyramid: &Pyramid) -> Vec<InternalKeypoint> {
-        let mut result = Vec::new();
+    fn find_oriented_keypoints<F>(&self, pyramid: &Pyramid, mut on_keypoint: F)
+    where
+        F: FnMut(InternalKeypoint),
+    {
         for (octave_index, octave) in pyramid.octaves.iter().enumerate() {
             if octave.dogs.len() < 3 {
                 continue;
@@ -348,18 +355,17 @@ impl Sift {
                         let Some(localized) = self.localize_extremum(octave, layer, x, y) else {
                             continue;
                         };
-                        for angle in self.assign_orientations(octave, &localized) {
-                            result.push(self.make_internal_keypoint(
+                        self.assign_orientations(octave, &localized, |angle| {
+                            on_keypoint(self.make_internal_keypoint(
                                 octave_index,
                                 localized.clone(),
                                 angle,
                             ));
-                        }
+                        });
                     }
                 }
             }
         }
-        result
     }
 
     fn image_border(&self) -> usize {
@@ -418,7 +424,7 @@ impl Sift {
         let mut x = initial_x as isize;
         let mut y = initial_y as isize;
         let mut offset = [0.0; 3];
-        let mut gradient = [0.0; 3];
+        let mut gradient;
 
         for _ in 0..self.config.max_interpolation_steps {
             if layer <= 0
@@ -502,10 +508,22 @@ impl Sift {
         trace * trace * edge < (edge + 1.0) * (edge + 1.0) * determinant
     }
 
-    fn assign_orientations(&self, octave: &Octave, keypoint: &LocalizedKeypoint) -> Vec<f32> {
+    fn assign_orientations<F>(&self, octave: &Octave, keypoint: &LocalizedKeypoint, mut on_angle: F)
+    where
+        F: FnMut(f32),
+    {
         let image = &octave.gaussians[keypoint.layer];
         let bins = self.config.orientation_bins;
-        let mut histogram = vec![0.0; bins];
+        
+        let mut stack_hist = [0.0; 128];
+        let mut heap_hist;
+        let histogram = if bins <= 128 {
+            &mut stack_hist[..bins]
+        } else {
+            heap_hist = vec![0.0; bins];
+            &mut heap_hist[..]
+        };
+
         let sigma = self.config.orientation_window_factor * keypoint.octave_scale;
         let radius = (3.0 * sigma).round() as isize;
         let sigma2 = 2.0 * sigma * sigma;
@@ -543,7 +561,7 @@ impl Sift {
         }
 
         for _ in 0..self.config.orientation_smooth_passes {
-            smooth_circular_histogram(&mut histogram);
+            smooth_circular_histogram(histogram);
         }
 
         let max_value = histogram
@@ -551,11 +569,10 @@ impl Sift {
             .copied()
             .fold(0.0_f32, |acc, v| if v > acc { v } else { acc });
         if max_value <= EPSILON {
-            return Vec::new();
+            return;
         }
 
         let threshold = self.config.orientation_peak_ratio * max_value;
-        let mut angles = Vec::new();
         for i in 0..bins {
             let left = histogram[(i + bins - 1) % bins];
             let center = histogram[i];
@@ -571,9 +588,8 @@ impl Sift {
             }
             .clamp(-0.5, 0.5);
             let interpolated_bin = i as f32 + offset;
-            angles.push(normalize_angle(interpolated_bin * TWO_PI / bins as f32));
+            on_angle(normalize_angle(interpolated_bin * TWO_PI / bins as f32));
         }
-        angles
     }
 
     fn make_internal_keypoint(
@@ -714,6 +730,7 @@ struct InternalKeypoint {
     octave_scale: f32,
 }
 
+#[inline]
 fn dog_gradient(octave: &Octave, layer: usize, x: usize, y: usize) -> [f32; 3] {
     let current = &octave.dogs[layer];
     [
@@ -723,6 +740,7 @@ fn dog_gradient(octave: &Octave, layer: usize, x: usize, y: usize) -> [f32; 3] {
     ]
 }
 
+#[inline]
 fn dog_hessian(octave: &Octave, layer: usize, x: usize, y: usize) -> [[f32; 3]; 3] {
     let current = &octave.dogs[layer];
     let previous = &octave.dogs[layer - 1];
@@ -745,6 +763,7 @@ fn dog_hessian(octave: &Octave, layer: usize, x: usize, y: usize) -> [[f32; 3]; 
     [[dxx, dxy, dxs], [dxy, dyy, dys], [dxs, dys, dss]]
 }
 
+#[inline]
 fn solve_3x3(mut a: [[f32; 3]; 3], mut b: [f32; 3]) -> Option<[f32; 3]> {
     for col in 0..3 {
         let mut pivot = col;
@@ -792,6 +811,7 @@ fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
+#[inline]
 fn normalize_angle(mut angle: f32) -> f32 {
     angle %= TWO_PI;
     if angle < 0.0 {
@@ -800,17 +820,27 @@ fn normalize_angle(mut angle: f32) -> f32 {
     angle
 }
 
+#[inline]
 fn smooth_circular_histogram(histogram: &mut [f32]) {
-    if histogram.len() < 3 {
+    let n = histogram.len();
+    if n < 3 {
         return;
     }
-    let original = histogram.to_vec();
-    let n = histogram.len();
+    let mut stack_buf = [0.0; 128];
+    let heap_buf;
+    let original = if n <= 128 {
+        stack_buf[..n].copy_from_slice(histogram);
+        &stack_buf[..n]
+    } else {
+        heap_buf = histogram.to_vec();
+        &heap_buf[..]
+    };
     for i in 0..n {
         histogram[i] = (original[(i + n - 1) % n] + original[i] + original[(i + 1) % n]) / 3.0;
     }
 }
 
+#[inline]
 fn trilinear_accumulate(
     hist: &mut [f32; DESCRIPTOR_LEN],
     rbin: f32,
@@ -849,6 +879,7 @@ fn trilinear_accumulate(
     }
 }
 
+#[inline]
 fn normalize_descriptor(values: &mut [f32; DESCRIPTOR_LEN]) -> Option<()> {
     let norm2: f32 = values.iter().map(|v| v * v).sum();
     if norm2 <= EPSILON * EPSILON {
