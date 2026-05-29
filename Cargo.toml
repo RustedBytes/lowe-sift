@@ -1,0 +1,37 @@
+[package]
+name = "lowe-sift"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "A paper-oriented Rust implementation of Lowe's SIFT detector, descriptor, BBF matcher, and Hough recognition helpers."
+license = "MIT"
+readme = "README.md"
+keywords = ["sift", "features", "image", "matching", "vision"]
+categories = ["algorithms", "multimedia::images", "science"]
+include = [
+    "src/**/*",
+    "examples/**/*",
+    "tests/**/*",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE-MIT",
+]
+
+[dependencies]
+image = { version = "0.25", optional = true, default-features = false, features = ["png", "jpeg"] }
+
+[features]
+default = ["image"]
+image = ["dep:image"]
+
+[[example]]
+name = "extract"
+required-features = ["image"]
+
+[[example]]
+name = "match"
+required-features = ["image"]
+
+[[example]]
+name = "recognize"
+required-features = ["image"]
