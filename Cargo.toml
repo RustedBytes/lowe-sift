@@ -1,8 +1,9 @@
 [package]
 name = "lowe-sift"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.92"
+repository = "https://github.com/RustedBytes/lowe-sift"
 description = "A paper-oriented Rust implementation of Lowe's SIFT detector, descriptor, BBF matcher, and Hough recognition helpers."
 license = "MIT"
 readme = "README.md"

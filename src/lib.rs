@@ -33,9 +33,13 @@
 mod gray;
 mod sift;
 
+/// Approximate Best-Bin-First (BBF) nearest-neighbor descriptor matching.
 pub mod bbf;
+/// 2D geometric transformation estimation (affine transforms via RANSAC/least-squares).
 pub mod geometry;
+/// Keypoint matching using exact nearest-neighbor search and Lowe's distance-ratio test.
 pub mod matching;
+/// Object recognition using generalized Hough transform pose clustering and verification.
 pub mod recognition;
 
 pub use crate::bbf::{

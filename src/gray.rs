@@ -20,7 +20,12 @@ pub enum GrayImageError {
     /// `width * height` overflowed `usize`.
     DimensionOverflow,
     /// The supplied buffer length did not match `width * height`.
-    InvalidBufferLength { expected: usize, actual: usize },
+    InvalidBufferLength {
+        /// The expected length of the buffer.
+        expected: usize,
+        /// The actual length of the buffer.
+        actual: usize,
+    },
 }
 
 impl fmt::Display for GrayImageError {
