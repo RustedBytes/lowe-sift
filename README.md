@@ -1,5 +1,7 @@
 # lowe-sift
 
+[![Crates.io Version](https://img.shields.io/crates/v/lowe-sift)](https://crates.io/crates/lowe-sift)
+
 A dependency-light Rust crate implementing Lowe-style SIFT feature extraction,
 matching, and object-recognition helpers from David G. Lowe, “Distinctive Image
 Features from Scale-Invariant Keypoints,” *International Journal of Computer
