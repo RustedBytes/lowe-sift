@@ -13,6 +13,7 @@ const EPSILON: f32 = 1.0e-7;
 
 /// A normalized 128-dimensional SIFT descriptor.
 #[derive(Clone, Debug, PartialEq)]
+#[repr(align(32))]
 pub struct Descriptor {
     values: [f32; DESCRIPTOR_LEN],
 }
@@ -548,23 +549,30 @@ impl Sift {
         let center_x = keypoint.octave_x.round() as isize;
         let center_y = keypoint.octave_y.round() as isize;
 
+        let width = image.width();
+        let height = image.height();
+        let data = image.data();
+
         for dy in -radius..=radius {
             let y = center_y + dy;
-            if y <= 0 || y >= image.height() as isize - 1 {
+            if y <= 0 || y >= height as isize - 1 {
                 continue;
             }
+            let y_offset = y as usize * width;
+            let y_prev_offset = (y - 1) as usize * width;
+            let y_next_offset = (y + 1) as usize * width;
+
             for dx in -radius..=radius {
                 let x = center_x + dx;
-                if x <= 0 || x >= image.width() as isize - 1 {
+                if x <= 0 || x >= width as isize - 1 {
                     continue;
                 }
                 let rel_x = x as f32 - keypoint.octave_x;
                 let rel_y = y as f32 - keypoint.octave_y;
                 let weight = (-(rel_x * rel_x + rel_y * rel_y) / sigma2).exp();
-                let gx = image.get((x + 1) as usize, y as usize)
-                    - image.get((x - 1) as usize, y as usize);
-                let gy = image.get(x as usize, (y + 1) as usize)
-                    - image.get(x as usize, (y - 1) as usize);
+                let x_usize = x as usize;
+                let gx = data[y_offset + x_usize + 1] - data[y_offset + x_usize - 1];
+                let gy = data[y_next_offset + x_usize] - data[y_prev_offset + x_usize];
                 let magnitude = (gx * gx + gy * gy).sqrt();
                 if magnitude <= EPSILON {
                     continue;
@@ -668,12 +676,20 @@ impl Sift {
         let weight_denom = 2.0 * weight_sigma * weight_sigma;
         let mut hist = [0.0_f32; DESCRIPTOR_LEN];
 
+        let width = image.width();
+        let height = image.height();
+        let data = image.data();
+
         for yy in (center_y - radius)..=(center_y + radius) {
-            if yy <= 0 || yy >= image.height() as isize - 1 {
+            if yy <= 0 || yy >= height as isize - 1 {
                 continue;
             }
+            let y_offset = yy as usize * width;
+            let y_prev_offset = (yy - 1) as usize * width;
+            let y_next_offset = (yy + 1) as usize * width;
+
             for xx in (center_x - radius)..=(center_x + radius) {
-                if xx <= 0 || xx >= image.width() as isize - 1 {
+                if xx <= 0 || xx >= width as isize - 1 {
                     continue;
                 }
 
@@ -691,10 +707,9 @@ impl Sift {
                     continue;
                 }
 
-                let gx = image.get((xx + 1) as usize, yy as usize)
-                    - image.get((xx - 1) as usize, yy as usize);
-                let gy = image.get(xx as usize, (yy + 1) as usize)
-                    - image.get(xx as usize, (yy - 1) as usize);
+                let xx_usize = xx as usize;
+                let gx = data[y_offset + xx_usize + 1] - data[y_offset + xx_usize - 1];
+                let gy = data[y_next_offset + xx_usize] - data[y_prev_offset + xx_usize];
                 let magnitude = (gx * gx + gy * gy).sqrt();
                 if magnitude <= EPSILON {
                     continue;
@@ -853,9 +868,11 @@ fn smooth_circular_histogram(histogram: &mut [f32]) {
         heap_buf = histogram.to_vec();
         &heap_buf[..]
     };
-    for i in 0..n {
-        histogram[i] = (original[(i + n - 1) % n] + original[i] + original[(i + 1) % n]) / 3.0;
+    histogram[0] = (original[n - 1] + original[0] + original[1]) / 3.0;
+    for i in 1..(n - 1) {
+        histogram[i] = (original[i - 1] + original[i] + original[i + 1]) / 3.0;
     }
+    histogram[n - 1] = (original[n - 2] + original[n - 1] + original[0]) / 3.0;
 }
 
 #[inline]
@@ -899,15 +916,39 @@ fn trilinear_accumulate(
 
 #[inline]
 fn normalize_descriptor(values: &mut [f32; DESCRIPTOR_LEN]) -> Option<()> {
-    let norm2: f32 = values.iter().map(|v| v * v).sum();
-    if norm2 <= EPSILON * EPSILON {
-        return None;
+    #[cfg(feature = "simd")]
+    {
+        use std::simd::f32x8;
+        use std::simd::num::SimdFloat;
+        let mut sum_simd = f32x8::splat(0.0);
+        for i in (0..DESCRIPTOR_LEN).step_by(8) {
+            let v = f32x8::from_slice(&values[i..i + 8]);
+            sum_simd += v * v;
+        }
+        let norm2 = sum_simd.reduce_sum();
+        if norm2 <= EPSILON * EPSILON {
+            return None;
+        }
+        let inv_norm = f32x8::splat(1.0 / norm2.sqrt());
+        for i in (0..DESCRIPTOR_LEN).step_by(8) {
+            let mut v = f32x8::from_slice(&values[i..i + 8]);
+            v *= inv_norm;
+            v.copy_to_slice(&mut values[i..i + 8]);
+        }
+        Some(())
     }
-    let inv_norm = 1.0 / norm2.sqrt();
-    for v in values {
-        *v *= inv_norm;
+    #[cfg(not(feature = "simd"))]
+    {
+        let norm2: f32 = values.iter().map(|v| v * v).sum();
+        if norm2 <= EPSILON * EPSILON {
+            return None;
+        }
+        let inv_norm = 1.0 / norm2.sqrt();
+        for v in values {
+            *v *= inv_norm;
+        }
+        Some(())
     }
-    Some(())
 }
 
 #[cfg(test)]

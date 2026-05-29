@@ -94,7 +94,7 @@ pub struct ApproxNeighbor {
 /// of approximate lookup used in Lowe's SIFT recognition pipeline.
 #[derive(Clone, Debug)]
 pub struct BbfDescriptorIndex {
-    descriptors: Vec<[f32; DESCRIPTOR_LEN]>,
+    descriptors: Vec<Descriptor>,
     indices: Vec<usize>,
     nodes: Vec<Node>,
     root: Option<usize>,
@@ -117,7 +117,7 @@ impl BbfDescriptorIndex {
             return Err(BbfConfigError::LeafSizeZero);
         }
 
-        let descriptors: Vec<_> = descriptors.iter().map(|d| *d.as_slice()).collect();
+        let descriptors = descriptors.to_vec();
         let mut index = Self {
             indices: (0..descriptors.len()).collect(),
             descriptors,
@@ -158,7 +158,7 @@ impl BbfDescriptorIndex {
     /// number of terminal descriptor vectors evaluated during the search.
     fn nearest_into(
         &self,
-        query_slice: &[f32; DESCRIPTOR_LEN],
+        query: &Descriptor,
         k: usize,
         max_candidates: usize,
         best: &mut Vec<ApproxNeighbor>,
@@ -177,7 +177,7 @@ impl BbfDescriptorIndex {
 
         queue.push(QueueEntry {
             lower_bound2: 0.0,
-            node_index: root,
+            node_index: root as u32,
         });
 
         let mut candidates = 0usize;
@@ -194,21 +194,21 @@ impl BbfDescriptorIndex {
                     }
             }
 
-            let node = &self.nodes[entry.node_index];
+            let node = &self.nodes[entry.node_index as usize];
             if node.is_leaf() {
-                for slot in node.start..node.end {
+                for slot in (node.start as usize)..(node.end as usize) {
                     if candidates >= max_candidates {
                         break;
                     }
                     let descriptor_index = self.indices[slot];
-                    let distance2 = distance2(query_slice, &self.descriptors[descriptor_index]);
+                    let distance2 = query.distance2(&self.descriptors[descriptor_index]);
                     candidates += 1;
                     insert_neighbor(best, k, descriptor_index, distance2);
                 }
                 continue;
             }
 
-            let q = query_slice[node.split_dim];
+            let q = query.as_slice()[node.split_dim as usize];
             let axis_delta = q - node.split_value;
             let (near, far) = if axis_delta <= 0.0 {
                 (node.left, node.right)
@@ -216,13 +216,13 @@ impl BbfDescriptorIndex {
                 (node.right, node.left)
             };
 
-            if let Some(near) = near {
+            if near != u32::MAX {
                 queue.push(QueueEntry {
                     lower_bound2: entry.lower_bound2,
                     node_index: near,
                 });
             }
-            if let Some(far) = far {
+            if far != u32::MAX {
                 queue.push(QueueEntry {
                     lower_bound2: entry.lower_bound2 + axis_delta * axis_delta,
                     node_index: far,
@@ -245,7 +245,7 @@ impl BbfDescriptorIndex {
     ) -> Result<Vec<ApproxNeighbor>, BbfConfigError> {
         let mut best = Vec::with_capacity(k.min(self.len()));
         let mut queue = BinaryHeap::new();
-        self.nearest_into(query.as_slice(), k, max_candidates, &mut best, &mut queue)?;
+        self.nearest_into(query, k, max_candidates, &mut best, &mut queue)?;
         Ok(best)
     }
 
@@ -269,7 +269,7 @@ impl BbfDescriptorIndex {
         for (query_index, descriptor) in query.iter().enumerate() {
             best.clear();
             queue.clear();
-            self.nearest_into(descriptor.as_slice(), 2, config.max_candidates, &mut best, &mut queue)?;
+            self.nearest_into(descriptor, 2, config.max_candidates, &mut best, &mut queue)?;
             if best.len() < 2 {
                 continue;
             }
@@ -312,19 +312,19 @@ impl BbfDescriptorIndex {
         let mid = start + len / 2;
         let descriptors = &self.descriptors;
         self.indices[start..end].select_nth_unstable_by(mid - start, |&a, &b| {
-            descriptors[a][split_dim].total_cmp(&descriptors[b][split_dim])
+            descriptors[a].as_slice()[split_dim].total_cmp(&descriptors[b].as_slice()[split_dim])
         });
 
-        let split_value = self.descriptors[self.indices[mid]][split_dim];
+        let split_value = self.descriptors[self.indices[mid]].as_slice()[split_dim];
         let left = self.build_node(start, mid);
         let right = self.build_node(mid, end);
         self.nodes[node_index] = Node {
-            start,
-            end,
-            split_dim,
+            start: start as u32,
+            end: end as u32,
+            split_dim: split_dim as u32,
             split_value,
-            left: Some(left),
-            right: Some(right),
+            left: left as u32,
+            right: right as u32,
         };
         node_index
     }
@@ -334,7 +334,7 @@ impl BbfDescriptorIndex {
         let mut max_values = [f32::NEG_INFINITY; DESCRIPTOR_LEN];
 
         for slot in start..end {
-            let descriptor = &self.descriptors[self.indices[slot]];
+            let descriptor = self.descriptors[self.indices[slot]].as_slice();
             for dim in 0..DESCRIPTOR_LEN {
                 let value = descriptor[dim];
                 if value < min_values[dim] {
@@ -393,35 +393,35 @@ pub fn match_features_bbf(
 
 #[derive(Clone, Debug)]
 struct Node {
-    start: usize,
-    end: usize,
-    split_dim: usize,
+    start: u32,
+    end: u32,
+    split_dim: u32,
     split_value: f32,
-    left: Option<usize>,
-    right: Option<usize>,
+    left: u32,
+    right: u32,
 }
 
 impl Node {
     fn leaf(start: usize, end: usize) -> Self {
         Self {
-            start,
-            end,
+            start: start as u32,
+            end: end as u32,
             split_dim: 0,
             split_value: 0.0,
-            left: None,
-            right: None,
+            left: u32::MAX,
+            right: u32::MAX,
         }
     }
 
     fn is_leaf(&self) -> bool {
-        self.left.is_none() && self.right.is_none()
+        self.left == u32::MAX && self.right == u32::MAX
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct QueueEntry {
     lower_bound2: f32,
-    node_index: usize,
+    node_index: u32,
 }
 
 impl Eq for QueueEntry {}
@@ -438,32 +438,6 @@ impl Ord for QueueEntry {
             .lower_bound2
             .total_cmp(&self.lower_bound2)
             .then_with(|| other.node_index.cmp(&self.node_index))
-    }
-}
-
-#[inline]
-fn distance2(a: &[f32; DESCRIPTOR_LEN], b: &[f32; DESCRIPTOR_LEN]) -> f32 {
-    #[cfg(feature = "simd")]
-    {
-        use std::simd::f32x8;
-        use std::simd::num::SimdFloat;
-        let mut sum_simd = f32x8::splat(0.0);
-        for i in (0..DESCRIPTOR_LEN).step_by(8) {
-            let va = f32x8::from_slice(&a[i..i + 8]);
-            let vb = f32x8::from_slice(&b[i..i + 8]);
-            let diff = va - vb;
-            sum_simd += diff * diff;
-        }
-        sum_simd.reduce_sum()
-    }
-    #[cfg(not(feature = "simd"))]
-    {
-        let mut sum = 0.0;
-        for dim in 0..DESCRIPTOR_LEN {
-            let delta = a[dim] - b[dim];
-            sum += delta * delta;
-        }
-        sum
     }
 }
 

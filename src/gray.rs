@@ -181,16 +181,41 @@ impl GrayImage {
     pub(crate) fn subtract(&self, rhs: &Self) -> Self {
         debug_assert_eq!(self.width, rhs.width);
         debug_assert_eq!(self.height, rhs.height);
-        let data = self
-            .data
-            .iter()
-            .zip(rhs.data.iter())
-            .map(|(a, b)| a - b)
-            .collect();
-        Self {
-            width: self.width,
-            height: self.height,
-            data,
+        #[cfg(feature = "simd")]
+        {
+            use std::simd::f32x8;
+            let len = self.data.len();
+            let mut data = vec![0.0; len];
+            let step = 8;
+            let end_simd = len - (len % step);
+            for i in (0..end_simd).step_by(step) {
+                let va = f32x8::from_slice(&self.data[i..i + 8]);
+                let vb = f32x8::from_slice(&rhs.data[i..i + 8]);
+                let diff = va - vb;
+                diff.copy_to_slice(&mut data[i..i + 8]);
+            }
+            for i in end_simd..len {
+                data[i] = self.data[i] - rhs.data[i];
+            }
+            Self {
+                width: self.width,
+                height: self.height,
+                data,
+            }
+        }
+        #[cfg(not(feature = "simd"))]
+        {
+            let data = self
+                .data
+                .iter()
+                .zip(rhs.data.iter())
+                .map(|(a, b)| a - b)
+                .collect();
+            Self {
+                width: self.width,
+                height: self.height,
+                data,
+            }
         }
     }
 
